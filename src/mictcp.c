@@ -16,7 +16,7 @@ int mic_tcp_socket(start_mode sm)
     mon_socket[i-1].fd = i;
     mon_socket[i-1].state = IDLE;
     i++;
-    return mon_socket[i].fd;
+    return mon_socket[i-2].fd;
 }
 
 /*
@@ -34,7 +34,7 @@ int mic_tcp_bind(int socket, mic_tcp_sock_addr addr)
 }
 
 /*
- * Met le socket enapp_buffer_put  état d'acceptation de connexions
+ * Met le socket app_buffer_put en en état d'acceptation de connexions
  * Retourne 0 si succès, -1 si erreur
  */
 int mic_tcp_accept(int socket, mic_tcp_sock_addr* addr)
@@ -104,7 +104,5 @@ int mic_tcp_close (int socket)
 void process_received_PDU(mic_tcp_pdu pdu, mic_tcp_ip_addr local_addr, mic_tcp_ip_addr remote_addr)
 {
     printf("[MIC-TCP] Appel de la fonction: "); printf(__FUNCTION__); printf("\n");
-    printf("size :%d\n", pdu.payload.size);
     app_buffer_put(pdu.payload);
-    printf("process_receivec_PDU fini\n");
 }
