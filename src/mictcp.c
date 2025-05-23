@@ -6,6 +6,7 @@
 
 mic_tcp_sock mon_socket[nbMax];
 unsigned short listeNumPortLoc[nbMax];
+int pourcentagePerteAcceptable = 20;
 
 /*
  * Permet de créer un socket entre l’application et MIC-TCP
@@ -73,6 +74,21 @@ int mic_tcp_connect(int socket, mic_tcp_sock_addr addr)
     return 0; //Pas d'établissement de connexion
 }
 
+int pourcentagePerteFenetre(int* fenetre){
+    int pourcentage = 0;
+    for(int i=0;i<10;i++){
+        pourcentage+=fenetre[i];
+    }
+    return pourcentage*10;
+}
+
+void addFenetre(int* fenetre, int res){
+    for(int i=0;i<9;i++){
+        fenetre[9-i]=fenetre[8-i];
+    }
+    fenetre[0]=res;
+}
+
 /*
  * Permet de réclamer l’envoi d’une donnée applicative
  * Retourne la taille des données envoyées, et -1 en cas d'erreur
@@ -80,6 +96,7 @@ int mic_tcp_connect(int socket, mic_tcp_sock_addr addr)
 int mic_tcp_send (int mic_sock, char* mesg, int mesg_size)
 {
     printf("[MIC-TCP] Appel de la fonction: "); printf(__FUNCTION__); printf("\n");
+    static int fenetreGlissante[10] = {0};
     static int num_seq = 0;  //numéro de séquence propre au socket
     mic_tcp_pdu pdu;
     pdu.header.source_port = mon_socket[mic_sock-1].local_addr.port;
@@ -108,12 +125,17 @@ int mic_tcp_send (int mic_sock, char* mesg, int mesg_size)
                     && pdu_ack.header.ack == 1  //vérification que le pdu reçu est un ACK
                     && pdu_ack.payload.size == 0  //vérification que le pdu reçu n'ait pas de payload
                     && pdu_ack.header.ack_num == num_seq+1){  //vérification que le pdu reçu ait le bon numéro d'aquittement
-                break;
+                num_seq++;  //incrémentation du numéro de séquence
+                printf("%d%d%d%d%d%d%d%d%d%d\n", fenetreGlissante[0],fenetreGlissante[1],fenetreGlissante[2],fenetreGlissante[3],fenetreGlissante[4],fenetreGlissante[5],fenetreGlissante[6],fenetreGlissante[7],fenetreGlissante[8],fenetreGlissante[9]);
+                addFenetre(fenetreGlissante,0);
+                return effectively_sent;
             }
+        } else if(pourcentagePerteFenetre(fenetreGlissante)<=pourcentagePerteAcceptable){
+            addFenetre(fenetreGlissante,1);
+            printf("Perte acceptable LOOOOOOOOOOOOOOOOOOOOOOOOL %d%d%d%d%d%d%d%d%d%d\n", fenetreGlissante[0],fenetreGlissante[1],fenetreGlissante[2],fenetreGlissante[3],fenetreGlissante[4],fenetreGlissante[5],fenetreGlissante[6],fenetreGlissante[7],fenetreGlissante[8],fenetreGlissante[9]);
+            return(0);
         }
     }
-    num_seq++;  //incrémentation du numéro de séquence
-    return effectively_sent;
 }
 
 /*
