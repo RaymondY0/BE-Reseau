@@ -2,10 +2,10 @@
 #include <api/mictcp_core.h>
 #include <string.h>
 
-#define nbMax 5
+#define nbMaxSocket 5
 
-mic_tcp_sock mon_socket[nbMax];
-unsigned short listeNumPortLoc[nbMax];
+mic_tcp_sock mon_socket[nbMaxSocket];
+unsigned short listeNumPortLoc[nbMaxSocket];
 int pourcentagePerteAcceptable = 20;
 
 /*
@@ -18,7 +18,7 @@ int mic_tcp_socket(start_mode sm)
     printf("[MIC-TCP] Appel de la fonction: ");  printf(__FUNCTION__); printf("\n");
     initialize_components(sm); /* Appel obligatoire */
     set_loss_rate(10);  //set le pourcentage de perte sur le rzo
-    if(i>=nbMax){  //si déjà 5 sockets crées en tout, refuser la création d'un socket
+    if(i>=nbMaxSocket){  //si déjà 5 sockets crées en tout, refuser la création d'un socket
         return(-1);
     }
     mon_socket[i-1].fd = i;
@@ -37,7 +37,7 @@ int mic_tcp_bind(int socket, mic_tcp_sock_addr addr)
     if(addr.port<1024||(0)){  //manque la vérif que addr ip est de la machine
         return(-1);
     }
-    if(socket>=nbMax){  //si descripteur du socket incorrecte, refuser le binding
+    if(socket>=nbMaxSocket){  //si descripteur du socket incorrecte, refuser le binding
         return(-1);
     }
     mon_socket[socket-1].local_addr = addr;
@@ -52,7 +52,7 @@ int mic_tcp_bind(int socket, mic_tcp_sock_addr addr)
 int mic_tcp_accept(int socket, mic_tcp_sock_addr* addr)
 {
     printf("[MIC-TCP] Appel de la fonction: ");  printf(__FUNCTION__); printf("\n");
-    if(socket>=nbMax){  //si descripteur du socket incorrecte, refuser le connect
+    if(socket>=nbMaxSocket){  //si descripteur du socket incorrecte, refuser le connect
         return(-1);
     }
     mon_socket[socket-1].state = ESTABLISHED;  //set le state du socket en connecté
@@ -66,7 +66,7 @@ int mic_tcp_accept(int socket, mic_tcp_sock_addr* addr)
 int mic_tcp_connect(int socket, mic_tcp_sock_addr addr)
 { 
     printf("[MIC-TCP] Appel de la fonction: ");  printf(__FUNCTION__); printf("\n");
-    if(socket>=nbMax){  //si descripteur du socket incorrecte, refuser le accept
+    if(socket>=nbMaxSocket){  //si descripteur du socket incorrecte, refuser le accept
         return(-1);
     }
     mon_socket[socket-1].remote_addr = addr;
@@ -75,18 +75,12 @@ int mic_tcp_connect(int socket, mic_tcp_sock_addr addr)
 }
 
 int pourcentagePerteFenetre(int* fenetre){
-    int pourcentage = 0;
-    for(int i=0;i<10;i++){
-        pourcentage+=fenetre[i];
-    }
-    return pourcentage*10;
+    return (fenetre[0]+fenetre[1]+fenetre[2]+fenetre[3]+fenetre[4]+fenetre[5]+fenetre[6]+fenetre[7]+fenetre[8]+fenetre[9])*10;
 }
 
 void addFenetre(int* fenetre, int res){
-    for(int i=0;i<9;i++){
-        fenetre[9-i]=fenetre[8-i];
-    }
-    fenetre[0]=res;
+    static int i = 0;
+    fenetre[i%10] = res;
 }
 
 /*
@@ -126,15 +120,17 @@ int mic_tcp_send (int mic_sock, char* mesg, int mesg_size)
                     && pdu_ack.payload.size == 0  //vérification que le pdu reçu n'ait pas de payload
                     && pdu_ack.header.ack_num == num_seq+1){  //vérification que le pdu reçu ait le bon numéro d'aquittement
                 num_seq++;  //incrémentation du numéro de séquence
-                printf("%d%d%d%d%d%d%d%d%d%d\n", fenetreGlissante[0],fenetreGlissante[1],fenetreGlissante[2],fenetreGlissante[3],fenetreGlissante[4],fenetreGlissante[5],fenetreGlissante[6],fenetreGlissante[7],fenetreGlissante[8],fenetreGlissante[9]);
                 addFenetre(fenetreGlissante,0);
+                free(addr_recue.ip_addr.addr);
                 return effectively_sent;
             }
         } else if(pourcentagePerteFenetre(fenetreGlissante)<=pourcentagePerteAcceptable){
+            printf("perte acceptable\n");
             addFenetre(fenetreGlissante,1);
-            printf("Perte acceptable LOOOOOOOOOOOOOOOOOOOOOOOOL %d%d%d%d%d%d%d%d%d%d\n", fenetreGlissante[0],fenetreGlissante[1],fenetreGlissante[2],fenetreGlissante[3],fenetreGlissante[4],fenetreGlissante[5],fenetreGlissante[6],fenetreGlissante[7],fenetreGlissante[8],fenetreGlissante[9]);
+            free(addr_recue.ip_addr.addr);
             return(0);
         }
+        printf("retransmission du pdu\n");
     }
 }
 
@@ -173,7 +169,7 @@ int mic_tcp_close (int socket)
 void process_received_PDU(mic_tcp_pdu pdu, mic_tcp_ip_addr local_addr, mic_tcp_ip_addr remote_addr)
 {
     printf("[MIC-TCP] Appel de la fonction: "); printf(__FUNCTION__); printf("\n");
-    static int num_seq[nbMax] = {0};
+    static int num_seq[nbMaxSocket] = {0};
     int i = 0;
     for(i=0;i<(sizeof(listeNumPortLoc)/sizeof(listeNumPortLoc[0]));i++){  //parcours de la liste des numéros de port pour trouver celui correspondant à celui du pdu reçu si existe
         if(pdu.header.dest_port == listeNumPortLoc[i]){
