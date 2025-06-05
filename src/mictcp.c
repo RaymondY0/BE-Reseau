@@ -1,8 +1,13 @@
 #include <mictcp.h>
 #include <api/mictcp_core.h>
 #include <string.h>
+#include <pthread.h>
 
 #define nbMaxSocket 5
+#define N 100
+
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
 mic_tcp_sock mon_socket[nbMaxSocket];
 unsigned short listeNumPortLoc[nbMaxSocket];
@@ -55,8 +60,37 @@ int mic_tcp_accept(int socket, mic_tcp_sock_addr* addr)
     if(socket>=nbMaxSocket){  //si descripteur du socket incorrecte, refuser le connect
         return(-1);
     }
-    mon_socket[socket-1].state = ESTABLISHED;  //set le state du socket en connecté
-    return 0; //Pas d'établissement de connexion nécessaire pour l'heure
+    unsigned long timeout = 2;  //temps en ms
+
+    while(socket[socket-1].state != SYN_RECEIVED){}
+
+    mic_tcp_pdu pdu_syn_ack;
+    pdu_syn_ack.header.source_port = mon_socket[socket-1].local_addr.port;
+    pdu_syn_ack.header.dest_port = addr->port;
+    pdu_syn_ack.header.syn = 1;
+    pdu_syn_ack.header.ack = 1;
+    pdu_syn_ack.payload.size = 0;
+    mic_tcp_sock_addr addr_recue2;
+    mic_tcp_pdu pdu_ack;
+    int i;
+    mon_socket[socket-1].state = SYN_SENT;
+    for(i=0;i<N;i++){
+        IP_send(pdu_syn_ack, addr_recue.ip_addr);  //envoi du PDU SYN-ACK
+        if((IP_recv(&pdu_ack, &mon_socket[socket-1].local_addr.ip_addr, &addr_recue2.ip_addr, timeout))!=-1){
+            if(strcmp(addr_recue.ip_addr.addr,addr_recue2.ip_addr.addr) == 0  //vérification que l'adresse ip recue correspond à l'adresse destinataire du IP_send (localhost 127.0.0.1)
+                    && pdu_ack.header.source_port == addr.port
+                    && pdu_ack.header.ack == 1
+                    && pdu_ack.header.syn != 1
+                    && pdu_ack.payload.size == 0){ //vérif
+                *addr = addr_recue;
+                mon_socket[socket-1].remote_addr = addr_recue;
+                mon_socket[socket-1].state = ESTABLISHED;
+                break;
+            }
+        }
+    }
+    mon_socket[socket-1].state = IDLE;
+	return(-(i>=N));
 }
 
 /*
@@ -69,9 +103,38 @@ int mic_tcp_connect(int socket, mic_tcp_sock_addr addr)
     if(socket>=nbMaxSocket){  //si descripteur du socket incorrecte, refuser le accept
         return(-1);
     }
-    mon_socket[socket-1].remote_addr = addr;
-    mon_socket[socket-1].state = ESTABLISHED;  //set le state du socket en connecté
-    return 0; //Pas d'établissement de connexion
+    mic_tcp_pdu pdu_syn;
+    pdu_syn.header.source_port = mon_socket.addr.port;
+    pdu_syn.header.dest_port = addr.port;
+    pdu_syn.header.ack = 0;
+    pdu_syn.header.syn = 1;
+    pdu_syn.payload.size = 0;
+    mic_tcp_sock_addr addr_recue;
+    mic_tcp_pdu pdu_syn_ack;
+    mon_socket[socket-1].state = SYN_SENT;
+    while(1){
+        if(IP_send(pdu_syn, addr.ip_addr)=-1){
+            return(-1);
+        }
+        if((IP_recv(&pdu_syn_ack, &mon_socket[socket-1].local_addr.ip_addr, &addr_recue.ip_addr, timeout))!=-1){
+            if(strcmp(addr_recue.ip_addr.addr,addr.ip_addr.addr) == 0  //vérification que l'adresse ip recue correspond à l'adresse destinataire du IP_send (localhost 127.0.0.1)
+                    && pdu_syn_ack.header.source_port == addr.port
+                    && pdu_syn_ack.header.ack == 1
+                    && pdu_syn_ack.header.syn == 1
+                    && pdu_syn_ack.payload.size == 0){ //vérif si adresse de source reçue est le même que l’adresse de destination mise dans le IP_send mais pas avec un ==
+                break;
+            }
+        }
+    }
+    mic_tcp_pdu pdu_ack;
+    pdu_ack.header.ack = 1;
+    pdu_ack.header.syn = 0;
+    pdu_ack.header.source_port = mon_socket.addr.port;
+    pdu_ack.header.dest_port = addr.port;
+    pdu_ack.payload.size = 0;
+	IP_send(pdu_ack, addr.ip_addr);
+	mon_socket[socket-1].state = ESTABLISHED;
+    return 0;
 }
 
 int pourcentagePerteFenetre(int* fenetre, int tailleFenetre){
@@ -184,19 +247,40 @@ void process_received_PDU(mic_tcp_pdu pdu, mic_tcp_ip_addr local_addr, mic_tcp_i
     int i = 0;
     for(i=0;i<(sizeof(listeNumPortLoc)/sizeof(listeNumPortLoc[0]));i++){  //parcours de la liste des numéros de port pour trouver celui correspondant à celui du pdu reçu si existe
         if(pdu.header.dest_port == listeNumPortLoc[i]){
-            if(pdu.header.seq_num == num_seq[i]){
-                app_buffer_put(pdu.payload);
-                num_seq[i]++;
+            if(mon_socket[i].state == ESTABLISHED){
+                if(pdu.header.seq_num == num_seq[i]){
+                    app_buffer_put(pdu.payload);
+                    num_seq[i]++;
+                }
+                mic_tcp_pdu pdu_ack;
+                pdu_ack.header.ack_num = num_seq[i];
+                pdu_ack.header.ack = 1;
+                pdu_ack.header.syn = 0;
+                pdu_ack.header.source_port = pdu.header.dest_port;
+                pdu_ack.header.dest_port = pdu.header.source_port;
+                pdu_ack.payload.size = 0;
+                IP_send(pdu_ack,remote_addr);
+                break;
+            } else if(mon_socket[i].state == IDLE){
+                if(pdu.header.syn == 1
+                        && pdu.header.ack != 1
+                        && pdu.payload.size == 0){
+                    mon_socket[i].state = SYN_RECEIVED;
+                }
+            } else if(mon_socket[i].state == SYN_SENT){
+                if(strcmp(remote_addr.addr,local_addr.addr) == 0  //vérification que l'adresse ip recue correspond à l'adresse destinataire du IP_send (localhost 127.0.0.1)
+                        && pdu.header.source_port == mon_socket[i].local_addr.port
+                        && pdu.header.ack == 1
+                        && pdu.header.syn != 1
+                        && pdu.payload.size == 0){ //vérif//à changer, si process_received recoi le ack final, il set le state du socket en ESTABLISHED tandis que dans le accept, une boucle sur i<N qui break ssi le state du socket est en established
+                    mic_tcp_sock_addr addrDist;
+                    addrDist.ip_addr = remote_addr;
+                    addrDist.port = pdu.header.source_port;
+                    mon_socket[socket-1].remote_addr = addrDist;  //dans accept, mettre le remote addr dans le addr argumentde accept
+                    mon_socket[socket-1].state = ESTABLISHED;
+                    break;
+                }
             }
-            break;
         }
     }
-    mic_tcp_pdu pdu_ack;
-    pdu_ack.header.ack_num = num_seq[i];
-    pdu_ack.header.ack = 1;
-    pdu_ack.header.syn = 0;
-    pdu_ack.header.source_port = pdu.header.dest_port;
-    pdu_ack.header.dest_port = pdu.header.source_port;
-    pdu_ack.payload.size = 0;
-    IP_send(pdu_ack,remote_addr);
 }
