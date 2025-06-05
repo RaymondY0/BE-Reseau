@@ -6,7 +6,7 @@
 
 mic_tcp_sock mon_socket[nbMaxSocket];
 unsigned short listeNumPortLoc[nbMaxSocket];
-int pourcentagePerteAcceptable = 20;
+int pourcentagePerteAcceptable = 10;
 
 /*
  * Permet de créer un socket entre l’application et MIC-TCP
@@ -74,13 +74,20 @@ int mic_tcp_connect(int socket, mic_tcp_sock_addr addr)
     return 0; //Pas d'établissement de connexion
 }
 
-int pourcentagePerteFenetre(int* fenetre){
-    return (fenetre[0]+fenetre[1]+fenetre[2]+fenetre[3]+fenetre[4]+fenetre[5]+fenetre[6]+fenetre[7]+fenetre[8]+fenetre[9])*10;
+int pourcentagePerteFenetre(int* fenetre, int tailleFenetre){
+    int sum = 0;
+    for(int i=0;i<tailleFenetre;i++){
+        sum+=fenetre[i];
+    }
+    return sum*100/tailleFenetre;
 }
 
-void addFenetre(int* fenetre, int res){
+int addFenetre(int* fenetre, int res){
     static int i = 0;
-    fenetre[i%10] = res;
+    fenetre[i%100] = res;
+    //printf("%d\n",i);
+    i++;
+    return i*(i<100)+100*(i>=100);
 }
 
 /*
@@ -90,7 +97,7 @@ void addFenetre(int* fenetre, int res){
 int mic_tcp_send (int mic_sock, char* mesg, int mesg_size)
 {
     printf("[MIC-TCP] Appel de la fonction: "); printf(__FUNCTION__); printf("\n");
-    static int fenetreGlissante[10] = {0};
+    static int fenetreGlissante[100] = {0};
     static int num_seq = 0;  //numéro de séquence propre au socket
     mic_tcp_pdu pdu;
     pdu.header.source_port = mon_socket[mic_sock-1].local_addr.port;
@@ -110,6 +117,8 @@ int mic_tcp_send (int mic_sock, char* mesg, int mesg_size)
     addr_recue.ip_addr.addr=malloc(100);
     addr_recue.ip_addr.addr_size=100;
 
+    int tailleFenetre = 1;
+
     while(1){
         effectively_sent = IP_send(pdu,mon_socket[mic_sock-1].remote_addr.ip_addr);
         if((IP_recv(&pdu_ack,&(mon_socket[mic_sock-1].local_addr.ip_addr),&addr_recue.ip_addr,timeout))!=-1){
@@ -120,13 +129,15 @@ int mic_tcp_send (int mic_sock, char* mesg, int mesg_size)
                     && pdu_ack.payload.size == 0  //vérification que le pdu reçu n'ait pas de payload
                     && pdu_ack.header.ack_num == num_seq+1){  //vérification que le pdu reçu ait le bon numéro d'aquittement
                 num_seq++;  //incrémentation du numéro de séquence
-                addFenetre(fenetreGlissante,0);
+                tailleFenetre = addFenetre(fenetreGlissante,0);
+                //printf("%d %d %d %d %d %d %d %d %d %d\n",fenetreGlissante[0],fenetreGlissante[1],fenetreGlissante[2],fenetreGlissante[3],fenetreGlissante[4],fenetreGlissante[5],fenetreGlissante[6],fenetreGlissante[7],fenetreGlissante[8],fenetreGlissante[9]);
                 free(addr_recue.ip_addr.addr);
                 return effectively_sent;
             }
-        } else if(pourcentagePerteFenetre(fenetreGlissante)<=pourcentagePerteAcceptable){
+        } else if(pourcentagePerteFenetre(fenetreGlissante,tailleFenetre)<=pourcentagePerteAcceptable){
             printf("perte acceptable\n");
-            addFenetre(fenetreGlissante,1);
+            tailleFenetre = addFenetre(fenetreGlissante,1);
+            //printf("%d %d %d %d %d %d %d %d %d %d\n",fenetreGlissante[0],fenetreGlissante[1],fenetreGlissante[2],fenetreGlissante[3],fenetreGlissante[4],fenetreGlissante[5],fenetreGlissante[6],fenetreGlissante[7],fenetreGlissante[8],fenetreGlissante[9]);
             free(addr_recue.ip_addr.addr);
             return(0);
         }
