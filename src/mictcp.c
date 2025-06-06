@@ -13,7 +13,7 @@ pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
 mic_tcp_sock mon_socket[nbMaxSocket];
 unsigned short listeNumPortLoc[nbMaxSocket];
-int pourcentagePerteAcceptable = 5;
+int pourcentagePerteAcceptable;
 
 /*
  * Permet de créer un socket entre l’application et MIC-TCP
@@ -106,6 +106,7 @@ int mic_tcp_connect(int socket, mic_tcp_sock_addr addr)
     pdu_syn.header.dest_port = addr.port;
     pdu_syn.header.ack = 0;
     pdu_syn.header.syn = 1;
+    pdu_syn.header.seq_num = 5;  //utilisation de seq_num dans le pdu syn pour négocier le taux de perte acceptable
     pdu_syn.payload.size = 0;
     mic_tcp_sock_addr addr_recue;
     mic_tcp_pdu pdu_syn_ack;
@@ -204,7 +205,7 @@ int mic_tcp_send (int mic_sock, char* mesg, int mesg_size)
                 free(addr_recue.ip_addr.addr);
                 return effectively_sent;
             }
-        } else if(pourcentagePerteFenetre(fenetreGlissante,tailleFenetre)<=pourcentagePerteAcceptable){
+        } else if(pourcentagePerteFenetre(fenetreGlissante,tailleFenetre)<pourcentagePerteAcceptable){
             printf("perte acceptable\n");
             tailleFenetre = addFenetre(fenetreGlissante,1);
             //printf("%d %d %d %d %d %d %d %d %d %d\n",fenetreGlissante[0],fenetreGlissante[1],fenetreGlissante[2],fenetreGlissante[3],fenetreGlissante[4],fenetreGlissante[5],fenetreGlissante[6],fenetreGlissante[7],fenetreGlissante[8],fenetreGlissante[9]);
@@ -274,6 +275,7 @@ void process_received_PDU(mic_tcp_pdu pdu, mic_tcp_ip_addr local_addr, mic_tcp_i
                         && pdu.payload.size == 0){
                     pthread_mutex_lock(&mutex);
 
+                    pourcentagePerteAcceptable = pdu.header.seq_num;  //le serveur accepte le taux de perte proposé par le client
                     mic_tcp_sock_addr addrDist;
                     addrDist.ip_addr = remote_addr;
                     addrDist.port = pdu.header.source_port;
