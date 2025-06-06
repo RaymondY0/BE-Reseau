@@ -14,6 +14,7 @@ pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 mic_tcp_sock mon_socket[nbMaxSocket];
 unsigned short listeNumPortLoc[nbMaxSocket];
 int pourcentagePerteAcceptable;
+pthread_t client_th;
 
 /*
  * Permet de créer un socket entre l’application et MIC-TCP
@@ -23,7 +24,10 @@ int mic_tcp_socket(start_mode sm)
 {
     static int i = 1;
     printf("[MIC-TCP] Appel de la fonction: ");  printf(__FUNCTION__); printf("\n");
-    initialize_components(sm); /* Appel obligatoire */
+    int res = initialize_components(sm); /* Appel obligatoire */
+    if((res == 1) && (mode == CLIENT)){
+        pthread_create(&client_th, NULL, thread_client, "1");
+    }
     set_loss_rate(80);  //set le pourcentage de perte sur le rzo
     if(i>=nbMaxSocket){  //si déjà 5 sockets crées en tout, refuser la création d'un socket
         return(-1);
@@ -101,7 +105,7 @@ int mic_tcp_connect(int socket, mic_tcp_sock_addr addr)
     }
     unsigned long timeout = 2;  //temps en ms
 
-    mic_tcp_pdu pdu_syn;
+    /* mic_tcp_pdu pdu_syn;
     pdu_syn.header.source_port = mon_socket[socket-1].local_addr.port;
     pdu_syn.header.dest_port = addr.port;
     pdu_syn.header.ack = 0;
@@ -109,10 +113,10 @@ int mic_tcp_connect(int socket, mic_tcp_sock_addr addr)
     pdu_syn.header.seq_num = 5;  //utilisation de seq_num dans le pdu syn pour négocier le taux de perte acceptable
     pdu_syn.payload.size = 0;
     mic_tcp_sock_addr addr_recue;
-    mic_tcp_pdu pdu_syn_ack;
+    mic_tcp_pdu pdu_syn_ack; */
     mon_socket[socket-1].state = SYN_SENT;
 
-    const int payload_size = 1500 - API_HD_Size;
+    /* const int payload_size = 1500 - API_HD_Size;
     pdu_syn_ack.payload.size = payload_size;
     pdu_syn_ack.payload.data = malloc(payload_size);
 
@@ -133,7 +137,7 @@ int mic_tcp_connect(int socket, mic_tcp_sock_addr addr)
                 break;
             }
         }
-    }
+    } */
     mic_tcp_pdu pdu_ack;
     pdu_ack.header.ack = 1;
     pdu_ack.header.syn = 0;
@@ -291,6 +295,51 @@ void process_received_PDU(mic_tcp_pdu pdu, mic_tcp_ip_addr local_addr, mic_tcp_i
                         && pdu.header.dest_port == mon_socket[i].local_addr.port){ //vérif
                     mon_socket[i].state = ESTABLISHED;
                     break;
+                }
+            }
+        }
+    }
+}
+
+void* thread_client(void* arg){
+    unsigned long timeout = 2;  //temps en ms
+    int socket = *(int*)arg;  //à donner le descripteur du socket dans le tableau de socket dans l'arg de la creation de thread
+
+    mic_tcp_pdu pdu_send;
+
+    mic_tcp_sock_addr addr_recue;
+    mic_tcp_pdu pdu_recue;
+
+    const int payload_size = 1500 - API_HD_Size;
+    pdu_recue.payload.size = payload_size;
+    pdu_recue.payload.data = malloc(payload_size);
+
+    while(1){
+        pthread_cond_wait(&cond,&mutex);
+        if(mon_socket[socket-1].state == SYN_SENT){
+            pdu_send.header.source_port = mon_socket[socket-1].local_addr.port;
+            pdu_send.header.dest_port = addr.port;
+            pdu_send.header.ack = 0;
+            pdu_send.header.syn = 1;
+            pdu_send.header.seq_num = 5;  //utilisation de seq_num dans le pdu syn pour négocier le taux de perte acceptable
+            pdu_send.payload.size = 0;
+
+            addr_recue.ip_addr.addr = malloc(100);
+            addr_recue.ip_addr.addr_size = 100;
+
+            while(1){
+                if(IP_send(pdu_send, addr.ip_addr)==-1){
+                    return(-1);
+                }
+                if((IP_recv(&pdu_recue &mon_socket[socket-1].local_addr.ip_addr, &addr_recue.ip_addr, timeout))!=-1){
+                    if(strcmp(addr_recue.ip_addr.addr,"127.0.0.1") == 0  //vérification que l'adresse ip recue correspond à l'adresse destinataire du IP_send (localhost 127.0.0.1)
+                            && pdu_recue.header.source_port == addr.port
+                            && pdu_recue.header.ack == 1
+                            && pdu_recue.header.syn == 1
+                            && pdu_recue.payload.size == 0){ //vérif si adresse de source reçue est le même que l’adresse de destination mise dans le IP_send mais pas avec un ==
+                        mon_socket[socket-1].remote_addr = addr;
+                        break;
+                    }
                 }
             }
         }
