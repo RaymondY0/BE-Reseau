@@ -37,13 +37,16 @@ int initialize_components(start_mode mode)
     struct sockaddr_in local_addr;
 
     if(initialized != -1) return initialized;
+
+    pthread_mutex_init(&lock, NULL);
+    TAILQ_INIT(&app_buffer_head);
+    pthread_cond_init(&buffer_empty_cond, 0);
+
     if((sys_socket = socket(AF_INET, SOCK_DGRAM, 0)) == -1) return -1;
     else initialized = 1;
 
     if((mode == SERVER) & (initialized != -1))
     {
-        TAILQ_INIT(&app_buffer_head);
-        pthread_cond_init(&buffer_empty_cond, 0);
         memset((char *) &local_addr, 0, sizeof(local_addr));
         local_addr.sin_family = AF_INET;
         local_addr.sin_port = htons(API_CS_Port);
@@ -290,8 +293,6 @@ void* listening(void* arg)
     int recv_size;
     mic_tcp_ip_addr remote;
     mic_tcp_ip_addr local;
-
-    pthread_mutex_init(&lock, NULL);
 
     printf("[MICTCP-CORE] Demarrage du thread de reception reseau...\n");
 

@@ -16,6 +16,130 @@ unsigned short listeNumPortLoc[nbMaxSocket];
 int pourcentagePerteAcceptable;
 pthread_t client_th;
 
+int pourcentagePerteFenetre(int* fenetre, int tailleFenetre){
+    int sum = 0;
+    for(int i=0;i<tailleFenetre;i++){
+        sum+=fenetre[i];
+    }
+    return sum*100/tailleFenetre;
+}
+
+int addFenetre(int* fenetre, int res){
+    static int i = 0;
+    fenetre[i%100] = res;
+    //printf("%d\n",i);
+    i++;
+    return i*(i<100)+100*(i>=100);
+}
+
+void* thread_client(void* arg){
+    unsigned long timeout = 2;  //temps en ms
+
+	
+	static int fenetreGlissante[100] = {0};  //ne fonctionne que pour 1 socket, sinon aurait fallu une fenetre et une variable num_seq static pour chaque socket possible
+    static int num_seq = 0;  //numéro de séquence propre au socket
+	static int tailleFenetre = 1;
+
+    mic_tcp_pdu pdu_send;
+
+    mic_tcp_sock_addr addr_recue;
+    mic_tcp_pdu pdu_recue;
+	
+	addr_recue.ip_addr.addr = malloc(100);
+    addr_recue.ip_addr.addr_size = 100;
+
+    const int payload_size = 1500 - API_HD_Size;
+    pdu_recue.payload.size = payload_size;
+    pdu_recue.payload.data = malloc(payload_size);
+	
+	mic_tcp_payload payload;
+    payload.data = malloc(payload_size);
+    payload.size = payload_size;
+
+    int socket;
+
+    pthread_mutex_lock(&mutex);
+
+    while(1){
+        pthread_cond_wait(&cond,&mutex);
+        socket = 1;  //il faudrait que l'on puisse récupérer le descripteur du socket appelant mictcp, mais je ne sais pas comment faire, et dans la mesure où l'algo ne fonctionne que pour 1 socket, on va considérer l'utilisation que du socket 1
+        
+        if(mon_socket[socket-1].state == SYN_SENT){
+            pdu_send.header.source_port = mon_socket[socket-1].local_addr.port;
+            pdu_send.header.dest_port = mon_socket[socket-1].remote_addr.port;
+            pdu_send.header.ack = 0;
+            pdu_send.header.syn = 1;
+            pdu_send.header.seq_num = 5;  //utilisation de seq_num dans le pdu syn pour négocier le taux de perte acceptable
+            pdu_send.payload.size = 0;
+            while(1){
+                if(IP_send(pdu_send, mon_socket[socket-1].remote_addr.ip_addr)==-1){
+                    mon_socket[socket-1].state = IDLE;
+                    break;
+                }
+                if((IP_recv(&pdu_recue, &mon_socket[socket-1].local_addr.ip_addr, &addr_recue.ip_addr, timeout))!=-1){
+                    if(strcmp(addr_recue.ip_addr.addr,"127.0.0.1") == 0  //vérification que l'adresse ip recue correspond à l'adresse destinataire du IP_send (localhost 127.0.0.1)
+                            && pdu_recue.header.source_port == mon_socket[socket-1].remote_addr.port
+                            && pdu_recue.header.ack == 1
+                            && pdu_recue.header.syn == 1
+                            && pdu_recue.payload.size == 0){ //vérif si adresse de source reçue est le même que l’adresse de destination mise dans le IP_send mais pas avec un ==
+						mon_socket[socket-1].state = ESTABLISHED;
+                        break;
+                    }
+                }
+            }
+            if(mon_socket[socket-1].state == ESTABLISHED){
+                pdu_send.header.ack = 1;
+                pdu_send.header.syn = 0;
+                pdu_send.payload.size = 0;
+                IP_send(pdu_send, mon_socket[socket-1].remote_addr.ip_addr);
+            }
+
+        } else if(mon_socket[socket-1].state == CLOSING){  //utilisation de l'état CLOSING comme un état DATA_SENT
+            //printf("payload size : %d\n", payload.size);
+            payload.size = payload_size;
+            pdu_send.payload.size = app_buffer_get(payload);
+			pdu_send.header.source_port = mon_socket[socket-1].local_addr.port;
+			pdu_send.header.dest_port = mon_socket[socket-1].remote_addr.port;
+			pdu_send.header.seq_num = num_seq;
+			pdu_send.payload.data = payload.data;
+			int effectively_sent;
+
+			while(1){
+				effectively_sent = IP_send(pdu_send,mon_socket[socket-1].remote_addr.ip_addr);
+				if((IP_recv(&pdu_recue,&(mon_socket[socket-1].local_addr.ip_addr),&addr_recue.ip_addr,timeout))!=-1){
+                    //printf("%d,%d\n",pdu_recue.header.syn,pdu_recue.header.ack_num);
+                    while(pdu_recue.header.syn == 1){  //ignorer les pdu SIN-ACK perdu
+                        IP_recv(&pdu_recue,&(mon_socket[socket-1].local_addr.ip_addr),&addr_recue.ip_addr,timeout);
+                    }
+					if(strcmp(addr_recue.ip_addr.addr,"127.0.0.1") == 0  //vérification que l'adresse ip recue correspond à l'adresse destinataire du IP_send (localhost 127.0.0.1)
+							&& pdu_recue.header.source_port == pdu_send.header.dest_port  //vérification que le numéro de port source du pdu recu correspond au numéro de port destinataire du pdu envoyé via IP_sent
+							&& pdu_recue.header.syn != 1  //vérification que le pdu reçu n'est pas un SYN
+							&& pdu_recue.header.ack == 1  //vérification que le pdu reçu est un ACK
+							&& pdu_recue.payload.size == 0  //vérification que le pdu reçu n'ait pas de payload
+							&& pdu_recue.header.ack_num == num_seq+1){  //vérification que le pdu reçu ait le bon numéro d'aquittement
+						num_seq++;  //incrémentation du numéro de séquence
+						tailleFenetre = addFenetre(fenetreGlissante,0);
+						
+						sprintf(payload.data,"%d",effectively_sent);
+                        payload.size = sizeof(payload.data);
+						break;
+					}
+				} else if(pourcentagePerteFenetre(fenetreGlissante,tailleFenetre)<pourcentagePerteAcceptable){
+					printf("perte acceptable\n");
+					tailleFenetre = addFenetre(fenetreGlissante,1);
+					
+					sprintf(payload.data,"%d",0);
+                    payload.size = sizeof(payload.data);
+                    break;
+				}
+				printf("retransmission du pdu\n");
+			}
+            app_buffer_put(payload);
+			mon_socket[socket-1].state = ESTABLISHED;
+		}
+    }
+}
+
 /*
  * Permet de créer un socket entre l’application et MIC-TCP
  * Retourne le descripteur du socket ou bien -1 en cas d'erreur
@@ -25,11 +149,11 @@ int mic_tcp_socket(start_mode sm)
     static int i = 1;
     printf("[MIC-TCP] Appel de la fonction: ");  printf(__FUNCTION__); printf("\n");
     int res = initialize_components(sm); /* Appel obligatoire */
-    if((res == 1) && (mode == CLIENT)){
+    if((i == 1) && (res == 1) && (sm == CLIENT)){
         pthread_create(&client_th, NULL, thread_client, "1");
     }
-    set_loss_rate(80);  //set le pourcentage de perte sur le rzo
-    if(i>=nbMaxSocket){  //si déjà 5 sockets crées en tout, refuser la création d'un socket
+    set_loss_rate(5);  //set le pourcentage de perte sur le rzo
+    if(i>nbMaxSocket){  //si déjà 5 sockets crées en tout, refuser la création d'un socket
         return(-1);
     }
     mon_socket[i-1].fd = i;
@@ -103,66 +227,16 @@ int mic_tcp_connect(int socket, mic_tcp_sock_addr addr)
     if(socket>=nbMaxSocket){  //si descripteur du socket incorrecte, refuser le accept
         return(-1);
     }
-    unsigned long timeout = 2;  //temps en ms
+    unsigned long timeout = 0.002;  //temps en s
 
-    /* mic_tcp_pdu pdu_syn;
-    pdu_syn.header.source_port = mon_socket[socket-1].local_addr.port;
-    pdu_syn.header.dest_port = addr.port;
-    pdu_syn.header.ack = 0;
-    pdu_syn.header.syn = 1;
-    pdu_syn.header.seq_num = 5;  //utilisation de seq_num dans le pdu syn pour négocier le taux de perte acceptable
-    pdu_syn.payload.size = 0;
-    mic_tcp_sock_addr addr_recue;
-    mic_tcp_pdu pdu_syn_ack; */
-    mon_socket[socket-1].state = SYN_SENT;
-
-    /* const int payload_size = 1500 - API_HD_Size;
-    pdu_syn_ack.payload.size = payload_size;
-    pdu_syn_ack.payload.data = malloc(payload_size);
-
-    addr_recue.ip_addr.addr = malloc(100);
-    addr_recue.ip_addr.addr_size = 100;
-
-    while(1){
-        if(IP_send(pdu_syn, addr.ip_addr)==-1){
-            return(-1);
-        }
-        if((IP_recv(&pdu_syn_ack, &mon_socket[socket-1].local_addr.ip_addr, &addr_recue.ip_addr, timeout))!=-1){
-            if(strcmp(addr_recue.ip_addr.addr,"127.0.0.1") == 0  //vérification que l'adresse ip recue correspond à l'adresse destinataire du IP_send (localhost 127.0.0.1)
-                    && pdu_syn_ack.header.source_port == addr.port
-                    && pdu_syn_ack.header.ack == 1
-                    && pdu_syn_ack.header.syn == 1
-                    && pdu_syn_ack.payload.size == 0){ //vérif si adresse de source reçue est le même que l’adresse de destination mise dans le IP_send mais pas avec un ==
-                mon_socket[socket-1].remote_addr = addr;
-                break;
-            }
-        }
-    } */
-    mic_tcp_pdu pdu_ack;
-    pdu_ack.header.ack = 1;
-    pdu_ack.header.syn = 0;
-    pdu_ack.header.source_port = mon_socket[socket-1].local_addr.port;
-    pdu_ack.header.dest_port = addr.port;
-    pdu_ack.payload.size = 0;
-	IP_send(pdu_ack, addr.ip_addr);
-	mon_socket[socket-1].state = ESTABLISHED;
-    return 0;
-}
-
-int pourcentagePerteFenetre(int* fenetre, int tailleFenetre){
-    int sum = 0;
-    for(int i=0;i<tailleFenetre;i++){
-        sum+=fenetre[i];
-    }
-    return sum*100/tailleFenetre;
-}
-
-int addFenetre(int* fenetre, int res){
-    static int i = 0;
-    fenetre[i%100] = res;
-    //printf("%d\n",i);
-    i++;
-    return i*(i<100)+100*(i>=100);
+	mon_socket[socket-1].remote_addr = addr;
+	mon_socket[socket-1].state = SYN_SENT;
+	
+	while(mon_socket[socket-1].state == SYN_SENT){
+        pthread_cond_broadcast(&cond);
+		sleep(timeout);
+	}
+    return -(mon_socket[socket-1].state != ESTABLISHED);
 }
 
 /*
@@ -172,52 +246,23 @@ int addFenetre(int* fenetre, int res){
 int mic_tcp_send (int mic_sock, char* mesg, int mesg_size)
 {
     printf("[MIC-TCP] Appel de la fonction: "); printf(__FUNCTION__); printf("\n");
-    static int fenetreGlissante[100] = {0};
-    static int num_seq = 0;  //numéro de séquence propre au socket
-    mic_tcp_pdu pdu;
-    pdu.header.source_port = mon_socket[mic_sock-1].local_addr.port;
-    pdu.header.dest_port = mon_socket[mic_sock-1].remote_addr.port;
-    pdu.header.seq_num = num_seq;
-    pdu.payload.data = mesg;
-    pdu.payload.size = mesg_size;
-    unsigned long timeout = 2;  //valeur du timer ACK en ms
-    mic_tcp_sock_addr addr_recue;
-    mic_tcp_pdu pdu_ack;
-    int effectively_sent;
+    unsigned long timeout = 0.002;  //temps en s
+	
+	mic_tcp_payload payload;
+    payload.data = mesg;
+    payload.size = mesg_size;
+	app_buffer_put(payload);
+	mon_socket[mic_sock-1].state = CLOSING;
+    pthread_mutex_lock(&mutex);
+	pthread_cond_broadcast(&cond);
+    pthread_mutex_unlock(&mutex);
+	
+	while(mon_socket[mic_sock-1].state == CLOSING){
+		sleep(timeout);
+	}
 
-    const int payload_size = 1500 - API_HD_Size;
-    pdu_ack.payload.size = payload_size;
-    pdu_ack.payload.data = malloc(payload_size);
-
-    addr_recue.ip_addr.addr = malloc(100);
-    addr_recue.ip_addr.addr_size = 100;
-
-    static int tailleFenetre = 1;
-
-    while(1){
-        effectively_sent = IP_send(pdu,mon_socket[mic_sock-1].remote_addr.ip_addr);
-        if((IP_recv(&pdu_ack,&(mon_socket[mic_sock-1].local_addr.ip_addr),&addr_recue.ip_addr,timeout))!=-1){
-            if(strcmp(addr_recue.ip_addr.addr,"127.0.0.1") == 0  //vérification que l'adresse ip recue correspond à l'adresse destinataire du IP_send (localhost 127.0.0.1)
-                    && pdu_ack.header.source_port == pdu.header.dest_port  //vérification que le numéro de port source du pdu recu correspond au numéro de port destinataire du pdu envoyé via IP_sent
-                    && pdu_ack.header.syn != 1  //vérification que le pdu reçu n'est pas un SYN
-                    && pdu_ack.header.ack == 1  //vérification que le pdu reçu est un ACK
-                    && pdu_ack.payload.size == 0  //vérification que le pdu reçu n'ait pas de payload
-                    && pdu_ack.header.ack_num == num_seq+1){  //vérification que le pdu reçu ait le bon numéro d'aquittement
-                num_seq++;  //incrémentation du numéro de séquence
-                tailleFenetre = addFenetre(fenetreGlissante,0);
-                //printf("%d %d %d %d %d %d %d %d %d %d\n",fenetreGlissante[0],fenetreGlissante[1],fenetreGlissante[2],fenetreGlissante[3],fenetreGlissante[4],fenetreGlissante[5],fenetreGlissante[6],fenetreGlissante[7],fenetreGlissante[8],fenetreGlissante[9]);
-                free(addr_recue.ip_addr.addr);
-                return effectively_sent;
-            }
-        } else if(pourcentagePerteFenetre(fenetreGlissante,tailleFenetre)<pourcentagePerteAcceptable){
-            printf("perte acceptable\n");
-            tailleFenetre = addFenetre(fenetreGlissante,1);
-            //printf("%d %d %d %d %d %d %d %d %d %d\n",fenetreGlissante[0],fenetreGlissante[1],fenetreGlissante[2],fenetreGlissante[3],fenetreGlissante[4],fenetreGlissante[5],fenetreGlissante[6],fenetreGlissante[7],fenetreGlissante[8],fenetreGlissante[9]);
-            free(addr_recue.ip_addr.addr);
-            return(0);
-        }
-        printf("retransmission du pdu\n");
-    }
+    app_buffer_get(payload);
+	return atoi(payload.data);
 }
 
 /*
@@ -301,47 +346,3 @@ void process_received_PDU(mic_tcp_pdu pdu, mic_tcp_ip_addr local_addr, mic_tcp_i
     }
 }
 
-void* thread_client(void* arg){
-    unsigned long timeout = 2;  //temps en ms
-    int socket = *(int*)arg;  //à donner le descripteur du socket dans le tableau de socket dans l'arg de la creation de thread
-
-    mic_tcp_pdu pdu_send;
-
-    mic_tcp_sock_addr addr_recue;
-    mic_tcp_pdu pdu_recue;
-
-    const int payload_size = 1500 - API_HD_Size;
-    pdu_recue.payload.size = payload_size;
-    pdu_recue.payload.data = malloc(payload_size);
-
-    while(1){
-        pthread_cond_wait(&cond,&mutex);
-        if(mon_socket[socket-1].state == SYN_SENT){
-            pdu_send.header.source_port = mon_socket[socket-1].local_addr.port;
-            pdu_send.header.dest_port = addr.port;
-            pdu_send.header.ack = 0;
-            pdu_send.header.syn = 1;
-            pdu_send.header.seq_num = 5;  //utilisation de seq_num dans le pdu syn pour négocier le taux de perte acceptable
-            pdu_send.payload.size = 0;
-
-            addr_recue.ip_addr.addr = malloc(100);
-            addr_recue.ip_addr.addr_size = 100;
-
-            while(1){
-                if(IP_send(pdu_send, addr.ip_addr)==-1){
-                    return(-1);
-                }
-                if((IP_recv(&pdu_recue &mon_socket[socket-1].local_addr.ip_addr, &addr_recue.ip_addr, timeout))!=-1){
-                    if(strcmp(addr_recue.ip_addr.addr,"127.0.0.1") == 0  //vérification que l'adresse ip recue correspond à l'adresse destinataire du IP_send (localhost 127.0.0.1)
-                            && pdu_recue.header.source_port == addr.port
-                            && pdu_recue.header.ack == 1
-                            && pdu_recue.header.syn == 1
-                            && pdu_recue.payload.size == 0){ //vérif si adresse de source reçue est le même que l’adresse de destination mise dans le IP_send mais pas avec un ==
-                        mon_socket[socket-1].remote_addr = addr;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-}
